@@ -1,0 +1,1102 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "./EnergyProfile.sol";
+import "./EnergyPool.sol";
+import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV2V3Interface.sol";
+import "@openzeppelin/contracts/access/Ownable.sol"; // Import the Ownable contract
+// The EnergyMarket contract handles the energy market.
+// It communicates with the EnergyProfile and EnergyPool contracts,
+// and uses data from the Oracle contracts to process and settle commitments.
+contract EnergyMarket is Ownable {
+    // References to other contracts
+    EnergyProfile private _energyProfileContract;
+    EnergyPool private _energyPoolContract;
+    AggregatorV2V3Interface private _energyPriceOracle;
+
+    // This struct holds the commitments to be processed by the EnergyMarket contract.
+    // Each entry in the buffer consists of a Profile NFT ID and a Commitment.
+    struct MarketBuffer {
+        uint256 profileNFTId;
+        uint256 commitmentIndex;
+    }
+    struct ProducerBuffer{
+        uint256 profileNFTId;
+        uint256 commitmentIndex;
+        }
+    struct ConsumerBuffer{
+        uint256 profileNFTId;
+        uint256 commitmentIndex;
+        }
+    ProducerBuffer[] public producerBuffer;
+    ConsumerBuffer[] public consumerBuffer;
+
+    // This array holds the buffer of commitments to be processed.
+//    MarketBuffer[] private _buffer;
+//     make buffer public
+
+    MarketBuffer[] public _buffer;
+    event MarketPriceUpdated(uint256 newEnergyPrice);
+    event CommitmentAddedToBuffer(uint256 profileNFTId, uint256 commitmentIndex);
+
+    // The constructor initializes the EnergyProfile and EnergyPool contract addresses.
+    constructor(address energyProfileContractAddress) {
+        _energyProfileContract = EnergyProfile(energyProfileContractAddress);
+    }
+
+     function setEnergyPoolContract(address energyPoolContractAddress) external onlyOwner {
+        // Here you might want to add some access control, for example allow only the contract owner to set this
+        _energyPoolContract = EnergyPool(energyPoolContractAddress);
+    }
+    // Add a new commitment to the MarketBuffer
+  // Add a new commitment to the MarketBuffer
+    function addCommitmentToBuffer(uint256 profileNFTId, uint256 commitmentIndex) public returns(uint256, uint256) {
+        // Only allow the EnergyPool or the owner of contract to call this function
+        require(msg.sender == address(_energyPoolContract) || msg.sender == owner(), "Only the EnergyPool contract or the owner of the contract can add a commitment to the buffer");
+
+        MarketBuffer memory newEntry;
+        newEntry.profileNFTId = profileNFTId;
+        newEntry.commitmentIndex = commitmentIndex;
+        _buffer.push(newEntry);
+
+        emit CommitmentAddedToBuffer(profileNFTId, commitmentIndex);
+
+        return (profileNFTId, commitmentIndex);
+    }
+
+
+    // Remove a commitment from the MarketBuffer
+    function removeCommitmentFromBuffer(uint256 index) public {
+//        // Only allow the EnergyPool contract to call this function
+//        require(msg.sender == address(_energyPoolContract), "Only the EnergyPool contract can remove a commitment from the buffer");
+
+        if (index >= _buffer.length) return;
+
+        _buffer[index] = _buffer[_buffer.length - 1];
+        _buffer.pop();
+    }
+    function getBufferLength() public view returns (uint256) {
+    return _buffer.length;
+}
+    // This function processes the commitments in the buffer.
+    // It first calls `check_expired_commitments()` to remove any expired commitments from the buffer.
+    // It then iterates over the remaining commitments in the buffer.
+    // If `energy_pool_processed` is true and the energy produced is less than `energyCommittedConsumption`
+    // for the current interval, it calls `processCommitment()`.
+    function process_buffer() public {
+        check_expired_commitments();
+
+        uint256 i = 0;
+        uint256 buffer_size = _buffer.length;
+
+        while(i < buffer_size) {
+            EnergyProfile.Commitment memory commitment = _energyProfileContract.getUserCommitments(_buffer[i].profileNFTId)[_buffer[i].commitmentIndex];
+            if (commitment.energy_pool_processed) {
+                // Process the commitment
+                processCommitment(_buffer[i].profileNFTId, _buffer[i].commitmentIndex);
+
+                // If the buffer has more than one element, swap the processed commitment with the last element
+                if (buffer_size > 1) {
+                    _buffer[i] = _buffer[buffer_size - 1];
+                }
+                // Remove the last element in the array
+                _buffer.pop();
+                // Reduce the buffer size
+                buffer_size = buffer_size - 1;
+            } else {
+                i = i + 1;
+            }
+        }
+    }
+
+
+    // This function checks if the commitments in the buffer are expired or not,
+    // and removes the expired ones from the buffer.
+    // The order of the commitments in the buffer is not important, so this operation can be performed efficiently.
+    function check_expired_commitments() public {
+        uint256 i = 0;
+        uint256 buffer_size = _buffer.length;
+
+        while(i < buffer_size) {
+            EnergyProfile.Commitment memory commitment = _energyProfileContract.getUserCommitments(_buffer[i].profileNFTId)[_buffer[i].commitmentIndex];
+            if (block.number > commitment.startBlock + commitment.duration) {
+                // If the buffer has more than one element, swap the expired commitment with the last element
+                if (buffer_size > 1) {
+                    _buffer[i] = _buffer[buffer_size - 1];
+                }
+                // Remove the last element in the array
+                _buffer.pop();
+                // Reduce the buffer size
+                buffer_size = buffer_size - 1;
+            } else {
+                i = i + 1;
+            }
+        }
+    }
+
+
+
+
+//  after debugging, this function should be internal
+    function processCommitment(uint256 profileNFTId, uint256 commitmentIndex) public {
+        EnergyProfile.Commitment memory commitment = _energyProfileContract.getUserCommitments(profileNFTId)[commitmentIndex];
+
+        // Update the energy amount in the energy pool contract
+        _energyPoolContract.updateIntervalEnergyByMarket(commitment.isProduction, commitment.energyAmount);
+
+        // Mark the commitment as processed by the energy market
+        _energyProfileContract.setMarketProcessed(profileNFTId, commitmentIndex, true);
+
+        // Based on commitment.isProduction add the commitment to producerBuffer or consumerBuffer
+        if (commitment.isProduction) {
+            // Add to the producerBuffer
+            ProducerBuffer memory newProducer;
+            newProducer.profileNFTId = profileNFTId;
+            newProducer.commitmentIndex = commitmentIndex;
+            producerBuffer.push(newProducer);
+        } else {
+            // Add to the consumerBuffer
+            ConsumerBuffer memory newConsumer;
+            newConsumer.profileNFTId = profileNFTId;
+            newConsumer.commitmentIndex = commitmentIndex;
+            consumerBuffer.push(newConsumer);
+        }
+    }
+
+// settle commitments v2
+    function settle_commitment() public {
+        uint256 producerIndex = 0;
+        uint256 consumerIndex = 0;
+        uint256 energyPrice;
+        uint256 demand=0;
+        uint256 supply_residual = 0;
+        uint256 producerBufferSize = producerBuffer.length;
+        uint256 consumerBufferSize = consumerBuffer.length;
+
+        // Iterate over the consumerBuffer
+        while (consumerIndex < consumerBufferSize) {
+            // Get the energy amount from the consumer's commitment
+            EnergyProfile.Commitment memory consumerCommitment = _energyProfileContract.getUserCommitments(consumerBuffer[consumerIndex].profileNFTId)[consumerBuffer[consumerIndex].commitmentIndex];
+            demand += consumerCommitment.energyAmount;
+
+            // Iterate over the producerBuffer
+            while (producerIndex < producerBufferSize) {
+                // Get the energy amount from the producer's commitment
+                EnergyProfile.Commitment memory producerCommitment = _energyProfileContract.getUserCommitments(producerBuffer[producerIndex].profileNFTId)[producerBuffer[producerIndex].commitmentIndex];
+                uint256 supply = producerCommitment.energyAmount+supply_residual;
+
+                if (supply <= demand) {
+                    // get energy_price form commitment
+                    energyPrice = producerCommitment.energy_price;
+
+                    // Transfer the payment from the consumer to the producer
+                    if (supply_residual > 0){
+                        _energyProfileContract.transferCollateral(consumerBuffer[consumerIndex].profileNFTId, producerBuffer[producerIndex].profileNFTId, supply_residual * energyPrice);
+                    } else {
+                        _energyProfileContract.transferCollateral(consumerBuffer[consumerIndex].profileNFTId, producerBuffer[producerIndex].profileNFTId, supply * energyPrice);
+                    }
+
+                    // settle the commitment
+                    _energyProfileContract.setCommitmentSettled(producerBuffer[producerIndex].profileNFTId,
+                        producerBuffer[producerIndex].commitmentIndex, true);
+
+                    demand = demand - supply;
+                    supply_residual = 0;
+
+                    // remove the settled commitment from the producerBuffer
+                    if (producerBufferSize > 1) {
+                        producerBuffer[producerIndex] = producerBuffer[producerBufferSize - 1];
+                    }
+                    producerBuffer.pop();
+                    producerBufferSize--;
+                } else {
+                    supply_residual = supply - demand;
+                    energyPrice = producerCommitment.energy_price;
+                    _energyProfileContract.transferCollateral(consumerBuffer[consumerIndex].profileNFTId,
+                    producerBuffer[producerIndex].profileNFTId, demand * energyPrice);
+                    _energyProfileContract.setCommitmentSettled(consumerBuffer[consumerIndex].profileNFTId,
+                        consumerBuffer[consumerIndex].commitmentIndex, true);
+
+                    // remove the settled commitment from the consumerBuffer
+                    if (consumerBufferSize > 1) {
+                        consumerBuffer[consumerIndex] = consumerBuffer[consumerBufferSize - 1];
+                    }
+                    consumerBuffer.pop();
+                    consumerBufferSize--;
+                    break;
+                }
+            }
+
+            if (producerIndex == producerBufferSize) {
+                break;
+            }
+        }
+    }
+
+////     get the price from oracle
+//    function updateEnergyPrice() public {
+//        (, int256 energyPrice, , ,) = _energyPriceOracle.latestRoundData();
+//        require(energyPrice >= 0, "Invalid energyPrice value from oracle");
+//        uint256 newEnergyPrice = uint256(energyPrice);
+//        emit MarketPriceUpdated(newEnergyPrice);
+//    }
+//    Add consumer to a consumer buffer
+
+}
+
+
+
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "./EnergyProfile.sol";
+import "./EnergyMarket.sol";
+import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV2V3Interface.sol";
+import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import "@openzeppelin/contracts/utils/Counters.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+
+
+contract EnergyPool is Ownable {
+    // State variables here
+    using Counters for Counters.Counter;
+    Counters.Counter private _poolIdCounter;
+
+        // Added explicit visibility to state variables
+    EnergyProfile private _energyProfileContract;
+    EnergyMarket private _energyMarketContract;
+    AggregatorV2V3Interface private _energyPriceOracle;
+
+
+    uint256 public totalEnergyCommittedProduction;
+    uint256 public totalEnergyCommittedConsumption;
+    uint256 public numberOfDeposits = 0;
+
+    mapping(uint256 => uint256) public intervalEnergyCommittedProduced;
+    mapping(uint256 => uint256) public intervalEnergyCommittedConsumed;
+    mapping(uint256 => uint256) public intervalEnergyProduced;
+    mapping(uint256 => uint256) public intervalEnergyConsumed;
+
+    mapping(uint256 => bool) private _depositedNFTs;
+    uint256 public intervalDuration = 295; //  295 blocks ~ 1 hour
+    uint256 public current_interval_block_number;
+    // Step 3: Constructor
+    constructor(
+    address energyProfileContractAddress,
+    address energyMarketContractAddress,
+    address energyPriceOracleAddress
+    ){
+    _energyProfileContract = EnergyProfile(energyProfileContractAddress);
+    _energyMarketContract = EnergyMarket(energyMarketContractAddress);
+    _energyPriceOracle = AggregatorV2V3Interface(energyPriceOracleAddress);
+    current_interval_block_number = block.number;
+    }
+    struct Interval {
+    uint256 energyCommittedProduction;
+    uint256 energyCommittedConsumption;
+    uint256 current_interval_block_number;
+    uint256 energyProduced;
+    uint256 energyConsumed;
+    }
+    Interval[24] public intervals;
+//    create two struct for interval producer and consumer with Profile NFT ID and commitment index
+
+
+    event Deposit(address indexed user, uint256 tokenId);
+    event Withdraw(address indexed user, uint256 tokenId);
+    event MarketPriceUpdated(uint256 newEnergyPrice);
+    event ProductionMatched(uint256 indexed tokenId, uint256 energyAmount);
+    event EnergyIntervalUpdated(uint256 indexed tokenId, uint256 totalEnergyCommittedProduction, uint256 totalEnergyCommittedConsumption, uint256 intervalEnergyProduced, uint256 intervalEnergyConsumed);
+
+
+    // Step 4: Deposit function
+    // Allows users to deposit their EnergyProfile NFTs into the pool
+    function deposit(uint256 tokenId) public {
+        require(IERC721(_energyProfileContract).ownerOf(tokenId) == msg.sender, "Not the owner of the token");
+
+        EnergyProfile.Commitment[] memory commitments = _energyProfileContract.getUserCommitments(tokenId);
+
+        for (uint i = 0; i < commitments.length; i++) {
+            updateIntervalEnergy(tokenId, i);
+            addCommitmentToMarketBufferAndProcess(tokenId, i);
+        _depositedNFTs[tokenId] = true;
+        }
+        numberOfDeposits += 1;
+        emit Deposit(msg.sender, tokenId);
+    }
+    function isDeposited(uint256 tokenId) public view returns (bool) {
+        return _depositedNFTs[tokenId];
+    }
+    function updateCommitment(
+        uint256 tokenId,
+        uint256 energyAmount,
+        bool isProduction,
+        uint256 duration
+    ) public {
+        // Check if the sender is the original owner of the token
+        require(
+            EnergyProfile(_energyProfileContract).ownerOf(tokenId) == msg.sender && _depositedNFTs[tokenId],
+            "Only the original owner of the token can update a commitment if the token is deposited in the EnergyPool"
+        );
+
+        // Call createCommitment on the EnergyProfile contract
+        uint256 newCommitmentIndex = EnergyProfile(_energyProfileContract).createCommitment(tokenId, energyAmount, isProduction,
+            duration);
+
+        // Call updateIntervalEnergy function
+        updateIntervalEnergy(tokenId, newCommitmentIndex);
+    }
+
+//  ----------------------- debug function, remove later
+    function setCommitmentSettled(uint256 tokenId, uint256 commitmentIndex) public {
+        _energyProfileContract.setCommitmentSettled(tokenId, commitmentIndex, true);
+    }
+
+//
+//    // Step 5: Withdraw function
+//    // Allows users to withdraw their EnergyProfile NFTs from the pool
+//    function withdraw(uint256 tokenId) public {
+//        require(IERC721(_energyProfileContract).ownerOf(tokenId) == msg.sender, "Not the owner of the token");
+////        IERC721(_energyProfileContract).approve(address(0), tokenId);
+//        numberOfDeposits--;
+//        emit Withdraw(msg.sender, tokenId);
+//        _depositedNFTs[tokenId] = false;
+//    }
+
+    function updateIntervalEnergy(uint256 tokenId, uint256 commitmentIndex) internal {
+        EnergyProfile.UserData memory userData = _energyProfileContract.getUserProfile(tokenId);
+        EnergyProfile.Commitment memory commitment = _energyProfileContract.getUserCommitments(tokenId)[commitmentIndex];
+
+        // Check if the commitment has been processed by the energy pool
+        require(!commitment.energy_pool_processed, "Commitment has already been processed by the energy pool");
+
+        uint256 intervalBlockNumber = block.number - current_interval_block_number;
+
+        if (intervalBlockNumber <intervalDuration) {
+            if (commitment.isProduction) {
+                totalEnergyCommittedProduction += commitment.energyAmount;
+                intervals[0].energyCommittedProduction += commitment.energyAmount;
+            } else {
+                totalEnergyCommittedConsumption += commitment.energyAmount;
+                intervals[0].energyCommittedConsumption += commitment.energyAmount;
+            }
+        } else {
+            current_interval_block_number = block.number;
+            Interval memory newInterval = Interval({
+                energyCommittedProduction: commitment.isProduction ? commitment.energyAmount : 0,
+                energyCommittedConsumption: !commitment.isProduction ? commitment.energyAmount : 0,
+                current_interval_block_number: current_interval_block_number,
+                energyProduced: 0,
+                energyConsumed: 0
+
+            });
+
+            // Perform a circular shift to the right and overwrite the last item in the intervals list
+            for (uint256 i = intervals.length - 1; i > 0; i--) {
+                intervals[i] = intervals[i - 1];
+            }
+
+            // Replace the first interval with the new interval
+            intervals[0] = newInterval;
+
+            if (commitment.isProduction) {
+                totalEnergyCommittedProduction += commitment.energyAmount;
+            } else {
+                totalEnergyCommittedConsumption += commitment.energyAmount;
+            }
+        }
+
+        // Mark the commitment as processed by the energy pool
+        _energyProfileContract.setCommitmentProcessed(tokenId, commitmentIndex, true);
+    }
+
+
+    // Helper function for the EnergyMarket contract to modify the energyProduced and energyConsumed
+    // of the first interval in the intervals array.
+    function updateIntervalEnergyByMarket(bool isProduction, uint256 energyAmount) public {
+        // Only allow the EnergyMarket contract to call this function
+        require(msg.sender == address(_energyMarketContract), "Only the EnergyMarket contract can update interval energy");
+
+        if (isProduction) {
+            intervals[0].energyProduced += energyAmount;
+        } else {
+            intervals[0].energyConsumed += energyAmount;
+        }
+    }
+
+
+        // Add a commitment to the market buffer and process it
+    function addCommitmentToMarketBufferAndProcess(uint256 profileNFTId, uint256 commitmentIndex) internal{
+//         make it callable only by current contract
+//        require(msg.sender == address(e), "Only the EnergyPool contract can add commitments to the market buffer");
+
+        // Call the addCommitmentToBuffer function of the EnergyMarket contract
+        _energyMarketContract.addCommitmentToBuffer(profileNFTId, commitmentIndex);
+
+        // Call the process_buffer function of the EnergyMarket contract
+        _energyMarketContract.process_buffer();
+    }
+
+    // Function to be called by a Chainlink oracle that activates the contract
+    function oracleActivation() external {
+        // Oracle activation logic here
+    }
+
+
+}
+
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
+import "@openzeppelin/contracts/utils/Counters.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV2V3Interface.sol";
+
+contract EnergyProfile is ERC721, ERC721Enumerable, Ownable {
+    using Counters for Counters.Counter;
+    Counters.Counter private _tokenIdCounter;
+    AggregatorV2V3Interface private _energyProducedOracle;
+    AggregatorV2V3Interface private _energyConsumedOracle;
+    AggregatorV2V3Interface private _energyPriceOracle;
+    // Add the EnergyPool contract address as a state variable
+    address private _energyPoolContract;
+    // Add the EnergyMarket contract address as a state variable
+    address private _energyMarketContract;
+    mapping(uint256 => uint256) private _currentCommitmentIndex;
+    constructor(
+        address energyProducedOracleAddress,
+        address energyConsumedOracleAddress,
+        address energyPriceOracleAddress
+    ) ERC721("EnergyProfile", "EP") {
+        _energyProducedOracle = AggregatorV2V3Interface(energyProducedOracleAddress);
+        _energyConsumedOracle = AggregatorV2V3Interface(energyConsumedOracleAddress);
+        _energyPriceOracle = AggregatorV2V3Interface(energyPriceOracleAddress);
+
+    }
+    struct UserData {
+        uint256 collateral;
+        uint256 energyProduced;
+        uint256 energyConsumed;
+        uint256 maxCommitment;
+        uint256 energyPrice;
+        string location;
+        string energyType;
+        uint256 historicalPerformance;
+
+    }
+
+    struct Commitment {
+        uint256 energyAmount;
+        bool isProduction;
+        uint256 startBlock;
+        uint256 duration;
+        bool settled;
+        bool energy_pool_processed;
+        bool energy_market_processed;
+        uint256 energy_price; // <- Change: added 'energy_price'
+    }
+
+    mapping(uint256 => UserData) private _userProfiles;
+    mapping(uint256 => Commitment[]) public _userCommitments;
+
+    event UserRegistered(address indexed user, uint256 tokenId);
+    event CommitmentCreated(uint256 indexed tokenId, Commitment commitment);
+    event EnergyDataUpdated(uint256 indexed tokenId, uint256 energyProduced, uint256 energyConsumed);
+    event EnergyPriceUpdated(uint256 indexed tokenId, uint256 newEnergyPrice);
+
+//    function registerUser(
+//        address user,
+//        uint256 collateral,
+//        string memory location,
+//        string memory energyType
+//    ) public {
+//        _tokenIdCounter.increment();
+//        uint256 tokenId = _tokenIdCounter.current();
+//        _mint(user, tokenId);
+//        _userProfiles[tokenId] = UserData(
+//            collateral,
+//            0,
+//            0,
+//            1000,
+//            0,
+//            location,
+//            energyType,
+//            100
+//        );
+//        emit UserRegistered(user, tokenId);
+//    }
+    function registerUser(
+        address user,
+        uint256 collateral,
+        string memory location,
+        string memory energyType
+    ) public payable {  // Here we make the function payable
+        _tokenIdCounter.increment();
+        uint256 tokenId = _tokenIdCounter.current();
+        _mint(user, tokenId);
+        _userProfiles[tokenId] = UserData(
+            msg.value,  // Here we set the collateral as the value sent with the transaction
+            0,
+            0,
+            1000,
+            0,
+            location,
+            energyType,
+            100
+        );
+    emit UserRegistered(user, tokenId);
+}
+
+
+
+    function getUserProfile(uint256 tokenId) public view returns (UserData memory) {
+        return _userProfiles[tokenId];
+    }
+
+
+//    -------------------- v3
+    function createCommitment(
+        uint256 tokenId,
+        uint256 energyAmount,
+        bool isProduction,
+        uint256 duration
+    ) public returns (uint256) { // <- Change: added 'returns (uint256)'
+        // Check if the sender is the owner of the token or the EnergyPool contract
+        require(
+            ownerOf(tokenId) == msg.sender || msg.sender == _energyPoolContract,
+            "Only the owner of the token or the EnergyPool contract can add a commitment"
+        );
+        UserData storage userData = _userProfiles[tokenId];
+        // Check if the sender is the owner of the token or the EnergyPool contract
+
+//        require(energyAmount <= userData.maxCommitment, "Energy amount exceeds maximum commitment");
+        (, int256 energyPrice, , ,) = _energyPriceOracle.latestRoundData(); // ths line has been added
+        Commitment memory newCommitment = Commitment({
+            energyAmount: energyAmount,
+            isProduction: isProduction,
+            startBlock: block.number,
+            duration: duration,
+            settled: false, // Set the settled status to false initially
+            energy_pool_processed: false,
+            energy_market_processed: false,
+            energy_price: uint256(energyPrice) // <- Change: added this line
+        });
+
+        uint256 newCommitmentIndex; // <- Change: added this line
+
+        // If the user has more than 3 commitments, replace the first settled one
+        if (_userCommitments[tokenId].length > 2) {
+            bool replaced = false;
+            for (uint i = 0; i < _userCommitments[tokenId].length; i++) {
+                // Check if the commitment is settled or the duration has passed
+                if (_userCommitments[tokenId][i].settled || block.number > _userCommitments[tokenId][i].startBlock + _userCommitments[tokenId][i].duration) {
+                    _userCommitments[tokenId][i] = newCommitment;
+                    replaced = true;
+                    newCommitmentIndex = i; // <- Change: added this line
+                    break;
+                }
+            }
+            require(replaced, "No settled commitment found to replace");
+        } else {
+            _userCommitments[tokenId].push(newCommitment);
+            newCommitmentIndex = _userCommitments[tokenId].length - 1; // <- Change: added this line
+        }
+
+        emit CommitmentCreated(tokenId, newCommitment);
+
+        return newCommitmentIndex; // <- Change: added this line
+    }
+
+//    function updateDepositedProfile(
+//        uint256 tokenId,
+//        uint256 energyAmount,
+//        bool isProduction,
+//        uint256 duration
+//    ) public returns (uint256) {
+//        // Check if the sender is the EnergyPool contract
+//        require(msg.sender == _energyPoolContract, "Only the EnergyPool contract can update the profile");
+//
+//        // Check if the token has been deposited to the EnergyPool contract
+////        require(ownerOf(tokenId) == _energyPoolContract, "Token is not deposited in the EnergyPool");
+//
+//        // Call createCommitment on the EnergyProfile contract and return the commitment index
+//        uint256 commitmentIndex = createCommitment(tokenId, energyAmount, isProduction, duration);
+//
+//        return commitmentIndex;
+//    }
+
+
+
+
+    //     to debug the issue, we can add a function to return the length of the commitments array
+    function getCommitmentsLength(uint256 tokenId) external view returns (uint256) {
+    return _userCommitments[tokenId].length;
+    }
+
+    function setEnergyPoolContract(address energyPoolContract) external onlyOwner {
+        _energyPoolContract = energyPoolContract;
+    }
+    function setEnergyMarketContract(address energyMarketContractAddress) external onlyOwner {
+    _energyMarketContract = energyMarketContractAddress;
+}
+
+        // Update the setCommitmentSettled function to include the required logic: change by
+        //EnergyPool contract or timeout
+    function setCommitmentSettled(uint256 tokenId, uint256 commitmentIndex, bool settledStatus) external {
+
+        Commitment storage commitment = _userCommitments[tokenId][commitmentIndex];
+
+        // Check if the sender is the EnergyPool contract or the EnergyMarket contract
+        require(
+            msg.sender == _energyPoolContract || msg.sender == _energyMarketContract,
+            "Only EnergyPool contract or EnergyMarket contract can update the settled status"
+        );
+
+
+        commitment.settled = settledStatus;
+    }
+    function setCommitmentProcessed(uint256 tokenId, uint256 commitmentIndex, bool processedStatus) external {
+        Commitment storage commitment = _userCommitments[tokenId][commitmentIndex];
+
+        // Check if the sender is the EnergyPool contract or EnergyMarket contract
+        require(
+            msg.sender == _energyPoolContract || msg.sender == _energyMarketContract,
+            "Only EnergyPool contract or EnergyMarket contract can update the processed status"
+        );
+        commitment.energy_pool_processed = processedStatus;
+    }
+    function getUserCommitments(uint256 tokenId) public view returns (Commitment[] memory) {
+        return _userCommitments[tokenId];
+    }
+//    set energy_market_processed from the commitment  to True
+    function setMarketProcessed(uint256 tokenId, uint256 commitmentIndex, bool processedStatus) external {
+        Commitment storage commitment = _userCommitments[tokenId][commitmentIndex];
+
+        // Check if the sender is the EnergyMarket contract
+//        require(
+//            msg.sender == _energyMarketContract,
+//            "ONly EnergyMarket contract can update the processed status"
+//        );
+
+        commitment.energy_market_processed = processedStatus;
+    }
+    function transferCollateral(uint256 fromTokenId, uint256 toTokenId, uint256 amount) public {
+        // Check if the sender is the owner of the fromToken or the EnergyMarket contract
+        require(
+            ownerOf(fromTokenId) == msg.sender || msg.sender == _energyMarketContract,
+            "Only the owner of the fromToken or the EnergyMarket contract can transfer collateral"
+        );
+
+        // Get the user profiles
+        UserData storage fromUserData = _userProfiles[fromTokenId];
+        UserData storage toUserData = _userProfiles[toTokenId];
+
+        // Check if the fromUser has enough collateral
+        require(fromUserData.collateral >= amount, "Not enough collateral to transfer");
+
+        // Subtract the amount from the fromUser's collateral
+        fromUserData.collateral -= amount;
+
+        // Add the amount to the toUser's collateral
+        toUserData.collateral += amount;
+    }
+    function withdrawCollateral(uint256 tokenId) public {
+        require(msg.sender == ownerOf(tokenId), "Only the owner can withdraw the collateral");
+
+        Commitment[] storage commitments = _userCommitments[tokenId];
+        for (uint i = 0; i < commitments.length; i++) {
+            // Check if the commitment is processed by the energy pool
+            if (commitments[i].energy_pool_processed) {
+                // Check if the commitment is settled
+                require(commitments[i].settled, "You have ongoing commitments, cannot withdraw collateral");
+            }
+        }
+
+        UserData storage user = _userProfiles[tokenId];
+        uint256 collateral = user.collateral;
+
+        require(collateral > 0, "No collateral to withdraw");
+
+        // reset the user's collateral
+        user.collateral = 0;
+
+        // Transfer the collateral to the user
+        payable(msg.sender).transfer(collateral);
+    }
+
+    function depositCollateral(uint256 tokenId) public payable {
+        // Check if the sender is the owner of the token
+//        require(msg.sender == ownerOf(tokenId), "Only the owner of the token can deposit more collateral");
+
+        // Add the sent amount to the user's collateral
+        _userProfiles[tokenId].collateral += msg.value;
+    }
+
+
+    function updateEnergyPrice(uint256 tokenId) public {
+        (, int256 energyPrice, , ,) = _energyPriceOracle.latestRoundData();
+
+        require(energyPrice >= 0, "Invalid energyPrice value from oracle");
+
+        _userProfiles[tokenId].energyPrice = uint256(energyPrice);
+        emit EnergyPriceUpdated(tokenId, uint256(energyPrice));
+    }
+    function _beforeTokenTransfer(address from, address to, uint256 tokenId) internal virtual override(ERC721, ERC721Enumerable) {
+        super._beforeTokenTransfer(from, to, tokenId);
+    }
+
+    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC721, ERC721Enumerable) returns (bool) {
+        return super.supportsInterface(interfaceId);
+    }
+}
+
+
+
+
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV2V3Interface.sol";
+
+/**
+ * @title MockV3Aggregator
+ * @notice Based on the FluxAggregator contract
+ * @notice Use this contract when you need to test
+ * other contract's ability to read data from an
+ * aggregator contract, but how the aggregator got
+ * its answer is unimportant
+ */
+contract MockV3AggregatorEnergyConsumed is AggregatorV2V3Interface {
+  uint256 constant public override version = 0;
+
+  uint8 public override decimals;
+  int256 public override latestAnswer;
+  uint256 public override latestTimestamp;
+  uint256 public override latestRound;
+
+  mapping(uint256 => int256) public override getAnswer;
+  mapping(uint256 => uint256) public override getTimestamp;
+  mapping(uint256 => uint256) private getStartedAt;
+
+  constructor(
+    uint8 _decimals,
+    int256 _initialAnswer
+  ) public {
+    decimals = _decimals;
+    updateAnswer(_initialAnswer);
+  }
+
+  function updateAnswer(
+    int256 _answer
+  ) public {
+    latestAnswer = _answer;
+    latestTimestamp = block.timestamp;
+    latestRound++;
+    getAnswer[latestRound] = _answer;
+    getTimestamp[latestRound] = block.timestamp;
+    getStartedAt[latestRound] = block.timestamp;
+  }
+
+  function updateRoundData(
+    uint80 _roundId,
+    int256 _answer,
+    uint256 _timestamp,
+    uint256 _startedAt
+  ) public {
+    latestRound = _roundId;
+    latestAnswer = _answer;
+    latestTimestamp = _timestamp;
+    getAnswer[latestRound] = _answer;
+    getTimestamp[latestRound] = _timestamp;
+    getStartedAt[latestRound] = _startedAt;
+  }
+
+  function getRoundData(uint80 _roundId)
+    external
+    view
+    override
+    returns (
+      uint80 roundId,
+      int256 answer,
+      uint256 startedAt,
+      uint256 updatedAt,
+      uint80 answeredInRound
+    )
+  {
+    return (
+      _roundId,
+      getAnswer[_roundId],
+      getStartedAt[_roundId],
+      getTimestamp[_roundId],
+      _roundId
+    );
+  }
+
+  function latestRoundData()
+    external
+    view
+    override
+    returns (
+      uint80 roundId,
+      int256 answer,
+      uint256 startedAt,
+      uint256 updatedAt,
+      uint80 answeredInRound
+    )
+  {
+    return (
+      uint80(latestRound),
+      getAnswer[latestRound],
+      getStartedAt[latestRound],
+      getTimestamp[latestRound],
+      uint80(latestRound)
+    );
+  }
+
+  function description()
+    external
+    view
+    override
+    returns (string memory)
+  {
+    return "v0.6/tests/MockV3Aggregator.sol";
+  }
+}
+
+// MockOracle
+// Function signatures, event signatures, log topics
+
+
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV2V3Interface.sol";
+/**
+ * @title MockV3Aggregator
+ * @notice Based on the FluxAggregator contract
+ * @notice Use this contract when you need to test
+ * other contract's ability to read data from an
+ * aggregator contract, but how the aggregator got
+ * its answer is unimportant
+ */
+contract MockV3AggregatorEnergyProduced is AggregatorV2V3Interface {
+  uint256 constant public override version = 0;
+
+  uint8 public override decimals;
+  int256 public override latestAnswer;
+  uint256 public override latestTimestamp;
+  uint256 public override latestRound;
+
+  mapping(uint256 => int256) public override getAnswer;
+  mapping(uint256 => uint256) public override getTimestamp;
+  mapping(uint256 => uint256) private getStartedAt;
+
+  constructor(
+    uint8 _decimals,
+    int256 _initialAnswer
+  ) public {
+    decimals = _decimals;
+    updateAnswer(_initialAnswer);
+  }
+
+  function updateAnswer(
+    int256 _answer
+  ) public {
+    latestAnswer = _answer;
+    latestTimestamp = block.timestamp;
+    latestRound++;
+    getAnswer[latestRound] = _answer;
+    getTimestamp[latestRound] = block.timestamp;
+    getStartedAt[latestRound] = block.timestamp;
+  }
+
+  function updateRoundData(
+    uint80 _roundId,
+    int256 _answer,
+    uint256 _timestamp,
+    uint256 _startedAt
+  ) public {
+    latestRound = _roundId;
+    latestAnswer = _answer;
+    latestTimestamp = _timestamp;
+    getAnswer[latestRound] = _answer;
+    getTimestamp[latestRound] = _timestamp;
+    getStartedAt[latestRound] = _startedAt;
+  }
+
+  function getRoundData(uint80 _roundId)
+    external
+    view
+    override
+    returns (
+      uint80 roundId,
+      int256 answer,
+      uint256 startedAt,
+      uint256 updatedAt,
+      uint80 answeredInRound
+    )
+  {
+    return (
+      _roundId,
+      getAnswer[_roundId],
+      getStartedAt[_roundId],
+      getTimestamp[_roundId],
+      _roundId
+    );
+  }
+
+  function latestRoundData()
+    external
+    view
+    override
+    returns (
+      uint80 roundId,
+      int256 answer,
+      uint256 startedAt,
+      uint256 updatedAt,
+      uint80 answeredInRound
+    )
+  {
+    return (
+      uint80(latestRound),
+      getAnswer[latestRound],
+      getStartedAt[latestRound],
+      getTimestamp[latestRound],
+      uint80(latestRound)
+    );
+  }
+
+  function description()
+    external
+    view
+    override
+    returns (string memory)
+  {
+    return "v0.6/tests/MockV3Aggregator.sol";
+  }
+}
+
+// MockOracle
+// Function signatures, event signatures, log topics
+
+
+
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV2V3Interface.sol";
+
+/**
+ * @title MockV3Aggregator
+ * @notice Based on the FluxAggregator contract
+ * @notice Use this contract when you need to test
+ * other contract's ability to read data from an
+ * aggregator contract, but how the aggregator got
+ * its answer is unimportant
+ */
+contract MockV3AggregatorPrice is AggregatorV2V3Interface {
+  uint256 constant public override version = 0;
+
+  uint8 public override decimals;
+  int256 public override latestAnswer;
+  uint256 public override latestTimestamp;
+  uint256 public override latestRound;
+
+  mapping(uint256 => int256) public override getAnswer;
+  mapping(uint256 => uint256) public override getTimestamp;
+  mapping(uint256 => uint256) private getStartedAt;
+
+  constructor(
+    uint8 _decimals,
+    int256 _initialAnswer
+  ) public {
+    decimals = _decimals;
+    updateAnswer(_initialAnswer);
+  }
+
+  function updateAnswer(
+    int256 _answer
+  ) public {
+    latestAnswer = _answer;
+    latestTimestamp = block.timestamp;
+    latestRound++;
+    getAnswer[latestRound] = _answer;
+    getTimestamp[latestRound] = block.timestamp;
+    getStartedAt[latestRound] = block.timestamp;
+  }
+
+  function updateRoundData(
+    uint80 _roundId,
+    int256 _answer,
+    uint256 _timestamp,
+    uint256 _startedAt
+  ) public {
+    latestRound = _roundId;
+    latestAnswer = _answer;
+    latestTimestamp = _timestamp;
+    getAnswer[latestRound] = _answer;
+    getTimestamp[latestRound] = _timestamp;
+    getStartedAt[latestRound] = _startedAt;
+  }
+
+  function getRoundData(uint80 _roundId)
+    external
+    view
+    override
+    returns (
+      uint80 roundId,
+      int256 answer,
+      uint256 startedAt,
+      uint256 updatedAt,
+      uint80 answeredInRound
+    )
+  {
+    return (
+      _roundId,
+      getAnswer[_roundId],
+      getStartedAt[_roundId],
+      getTimestamp[_roundId],
+      _roundId
+    );
+  }
+
+  function latestRoundData()
+    external
+    view
+    override
+    returns (
+      uint80 roundId,
+      int256 answer,
+      uint256 startedAt,
+      uint256 updatedAt,
+      uint80 answeredInRound
+    )
+  {
+    return (
+      uint80(latestRound),
+      getAnswer[latestRound],
+      getStartedAt[latestRound],
+      getTimestamp[latestRound],
+      uint80(latestRound)
+    );
+  }
+
+  function description()
+    external
+    view
+    override
+    returns (string memory)
+  {
+    return "v0.6/tests/MockV3Aggregator.sol";
+  }
+}
+
+// MockOracle
+// Function signatures, event signatures, log topics

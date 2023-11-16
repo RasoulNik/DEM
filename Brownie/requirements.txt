@@ -1,0 +1,5 @@
+flask
+eth-brownie
+gradio
+numpy
+matplotlib
