@@ -1,5 +1,5 @@
 title: Decentralized Energy Marketplace (DEM) via NFTs and AI-based Agents
+remote_theme: "mmistakes/minimal-mistakes@4.24.0"
 
-# theme: jekyll-theme-minimal # Replace with your chosen theme
-remote_theme: "mmistakes/minimal-mistakes"
-
+plugins:
+  - jekyll-include-cache
