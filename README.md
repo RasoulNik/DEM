@@ -16,7 +16,7 @@ This project introduces an advanced Decentralized Energy Marketplace (DEM) integ
 - **VPP and Grid Operators:** Integration of DEM, smart homes, and FDRL agents to create a VPP.
 
 <div align="center">
-  <img src="/webpage/Figs/Framework_Grid.png" alt="System Model" width="300">
+  <img src="/webpage/Figs/Framework_Grid.png" alt="System Model" width="600">
 </div>
 
 ## Blockchain-enabled Smart Contracts
@@ -25,7 +25,7 @@ This project introduces an advanced Decentralized Energy Marketplace (DEM) integ
 - **EnergyMarket Contract:** Core operational link among contracts, managing transactions and settlements.
 
 <div align="center">
-  <img src="/webpage/Figs/Smart-Grid-Blockchain(2).png" alt="Smart Contracts Interaction" width="300">
+  <img src="/webpage/Figs/Smart-Grid-Blockchain(2).png" alt="Smart Contracts Interaction" width="600">
 </div>
 
 ## AI-based Agents
@@ -37,11 +37,11 @@ This project introduces an advanced Decentralized Energy Marketplace (DEM) integ
 - **Training of AI Agents:** Dataset analysis and model training results.
 
 <div align="center">
-  <img src="/webpage/Figs/gas_usage_bar_plot.png" alt="Gas Usage" width="300">
+  <img src="/webpage/Figs/gas_usage_bar_plot.png" alt="Gas Usage" width="600">
 </div>
 
 <div align="center">
-  <img src="/webpage/Figs/Reward-fed_nonfed.png" alt="AI Agents Training" width="300">
+  <img src="/webpage/Figs/Reward-fed_nonfed.png" alt="AI Agents Training" width="600">
 </div>
 
 ## Future Work
