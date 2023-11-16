@@ -15,7 +15,7 @@ This project introduces an advanced Decentralized Energy Marketplace (DEM) integ
 - **FDRL Framework:** Enables smart buildings to refine energy strategies collaboratively.
 - **VPP and Grid Operators:** Integration of DEM, smart homes, and FDRL agents to create a VPP.
 
-![System Model](/webpage/Figs/Framework_Grid.pdf)
+![System Model](/webpage/Figs/Framework_Grid.png)
 
 ## Blockchain-enabled Smart Contracts
 - **EnergyProfile Contract:** Manages participants' energy profiles.
@@ -32,8 +32,8 @@ This project introduces an advanced Decentralized Energy Marketplace (DEM) integ
 - **Deployment and Testing:** Using Brownie and Ganache with Chainlink mock contracts.
 - **Training of AI Agents:** Dataset analysis and model training results.
 
-![Gas Usage](/webpage_folder/Figs/gas_usage_bar_plot.pdf)
-![AI Agents Training](/webpage/Figs/Reward-fed_nonfed.pdf)
+![Gas Usage](/webpage/Figs/gas_usage_bar_plot.png)
+![AI Agents Training](/webpage/Figs/Reward-fed_nonfed.png)
 
 ## Future Work
 Integration of off-chain AI agent execution using the Zero-Knowledge Machine Learning (ZK-ML) stack to fortify security and reduce blockchain computational demands.
