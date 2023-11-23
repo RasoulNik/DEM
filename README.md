@@ -48,6 +48,9 @@ This project introduces an advanced Decentralized Energy Marketplace (DEM) integ
 Integration of off-chain AI agent execution using the Zero-Knowledge Machine Learning (ZK-ML) stack to fortify security and reduce blockchain computational demands.
 ## How to Cite
 If you find this work useful for your research, please consider citing:
+insert bibtex here
+
+link to arxiv: https://arxiv.org/abs/2311.10406
 
 @misc{nikbakht2023decentralized,
 title={Decentralized Energy Marketplace via NFTs and AI-based Agents},
@@ -57,6 +60,7 @@ eprint={2311.10406},
 archivePrefix={arXiv},
 primaryClass={cs.NI}
 }
+
 
 ## Contributions
 This work is a collaborative effort of researchers at the Centre Tecnològic Telecomunicacions Catalunya (CTTC/CERCA).
